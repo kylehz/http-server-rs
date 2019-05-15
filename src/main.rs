@@ -1,11 +1,16 @@
-use actix_web::actix;
-use actix_web::server;
+// use actix_web::actix;
+use actix_files as fs;
+use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use clap;
 use env_logger;
 use log;
 
 mod channel;
-mod web;
+mod handler;
+
+fn index() -> &'static str {
+    "Welcome!"
+}
 
 fn main() -> Result<(), std::io::Error> {
     let app = clap::App::new(clap::crate_name!())
@@ -51,12 +56,26 @@ fn main() -> Result<(), std::io::Error> {
     let root = std::path::PathBuf::from(chdir).canonicalize()?;
     std::env::set_current_dir(&root)?;
 
-    let sys = actix::System::new("http_server_rs");
+    let sys = actix_rt::System::new("http_server_rs");
 
     log::info!("Serving files from {:?}", root);
-    server::new(move || web::create_app(&root).unwrap())
-        .bind(&bind_addr)?
-        .start();
+    // web::create_app(&root).unwrap()
+
+    let root = root.to_path_buf(); // practically makes a copy, so it can be used as state
+    let app = move || {
+        App::new()
+            .data(root.clone())
+            .wrap(middleware::Logger::default())
+            .service(web::resource(r"/{tail:.*}.tar").route(web::get().to(handler::handle_tar))) //f(handle_tar)
+            .service(web::resource(r"/favicon.ico").route(web::get().to(handler::favicon_ico))) // f(favicon_ico)
+            .service(
+                fs::Files::new("/", ".")
+                    .show_files_listing()
+                    .files_listing_renderer(handler::handle_directory),
+            )
+    };
+
+    HttpServer::new(app).bind(&bind_addr)?.start();
 
     let _ = sys.run();
     Ok(())

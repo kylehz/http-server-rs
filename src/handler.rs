@@ -1,5 +1,6 @@
-use actix_web::dev::FromParam;
-use actix_web::{error, fs, middleware, App, HttpRequest, HttpResponse, Responder};
+use actix_files as fs;
+use actix_web::dev::ServiceResponse;
+use actix_web::{error, middleware, web, App, HttpRequest, HttpResponse};
 use futures::Stream;
 use htmlescape::encode_minimal as escape_html_entity;
 use percent_encoding::{utf8_percent_encode, DEFAULT_ENCODE_SET};
@@ -11,23 +12,10 @@ use std;
 use std::fmt::Write;
 use std::path::PathBuf;
 
-pub fn create_app(directory: &PathBuf) -> Result<App<PathBuf>, error::Error> {
-    let root = directory.to_path_buf(); // practically makes a copy, so it can be used as state
-    let static_files = fs::StaticFiles::new(&root)?
-        .show_files_listing()
-        .files_listing_renderer(handle_directory);
-    let app = App::with_state(root)
-        .middleware(middleware::Logger::default())
-        .resource(r"/{tail:.*}.tar", |r| r.get().f(handle_tar))
-        .resource(r"/favicon.ico", |r| r.get().f(favicon_ico))
-        .handler("/", static_files);
-    Ok(app)
-}
-
-fn handle_directory<'a, 'b>(
+pub fn handle_directory<'a, 'b>(
     dir: &'a fs::Directory,
-    req: &'b HttpRequest<PathBuf>,
-) -> std::io::Result<HttpResponse> {
+    req: &'b HttpRequest,
+) -> std::io::Result<ServiceResponse> {
     let rd = std::fs::read_dir(&dir.path)?;
 
     fn optimistic_is_dir(entry: &std::fs::DirEntry) -> bool {
@@ -118,21 +106,23 @@ fn handle_directory<'a, 'b>(
     writeln!(html, "<body>\n{}</body>", body).unwrap();
     writeln!(html, "</html>").unwrap();
 
-    Ok(HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(html))
+    Ok(ServiceResponse::new(
+        req.clone(),
+        HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .body(html),
+    ))
 }
 
-fn handle_tar(req: &HttpRequest<PathBuf>) -> impl Responder {
-    let root = req.state();
-    let tail: String = req.match_info().query("tail")?;
-    let relpath = PathBuf::from_param(tail.trim_left_matches('/'))?;
+// 对目录打包下载 如 http://localhost:8000/src.tar 表示下载整个src目录
+pub fn handle_tar(req: HttpRequest, data: web::Data<PathBuf>) -> actix_web::Result<HttpResponse> {
+    let root = data;
+    let tail = req.match_info().query("tail");
+    let relpath = PathBuf::from(tail.trim_left_matches('/'));
     let fullpath = root.join(&relpath).canonicalize()?;
-
     if !(fullpath.is_dir()) {
         return Err(error::ErrorBadRequest("not a directory"));
     }
-
     let stream = channel::stream_tar_in_thread(fullpath);
     let resp = HttpResponse::Ok()
         .content_type("application/x-tar")
@@ -140,7 +130,7 @@ fn handle_tar(req: &HttpRequest<PathBuf>) -> impl Responder {
     Ok(resp)
 }
 
-fn favicon_ico(_req: &HttpRequest<PathBuf>) -> impl Responder {
+pub fn favicon_ico(_req: HttpRequest) -> HttpResponse {
     HttpResponse::Ok()
         .content_type("image/png")
         .header("Cache-Control", "only-if-cached, max-age=86400")
